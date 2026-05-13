@@ -1,17 +1,129 @@
-// FILE: bucketlist-backend/routes/payments.js
+// ================================================
+// FILE LOCATION: bucketlist-backend/routes/payments.js
+// PURPOSE: M-Pesa Daraja API — STK Push, Callback, Status
+// ================================================
 
 const express = require('express');
 const router = express.Router();
-const IntaSend = require('intasend-node');
+const https = require('https');
 const supabase = require('../config/db');
 const { authMiddleware } = require('../middleware/auth');
 
-// Initialize Intasend with both keys
-const intasend = new IntaSend(
-  process.env.INTASEND_PUBLISHABLE_KEY,
-  process.env.INTASEND_SECRET_KEY,
-  process.env.INTASEND_ENV !== 'production' // true = test/sandbox
-);
+// ─── DARAJA HELPERS ──────────────────────────────────────────────────────────
+
+const DARAJA_BASE =
+  process.env.MPESA_ENV === 'production'
+    ? 'api.safaricom.co.ke'
+    : 'sandbox.safaricom.co.ke';
+
+/** Get OAuth access token from Daraja */
+function getDarajaToken() {
+  return new Promise((resolve, reject) => {
+    const credentials = Buffer.from(
+      `${process.env.MPESA_CONSUMER_KEY}:${process.env.MPESA_CONSUMER_SECRET}`
+    ).toString('base64');
+
+    const options = {
+      hostname: DARAJA_BASE,
+      path: '/oauth/v1/generate?grant_type=client_credentials',
+      method: 'GET',
+      headers: { Authorization: `Basic ${credentials}` },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.access_token) resolve(parsed.access_token);
+          else reject(new Error('Token error: ' + data));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/** Generate Daraja timestamp (YYYYMMDDHHmmss) */
+function getTimestamp() {
+  const now = new Date();
+  return (
+    now.getFullYear().toString() +
+    String(now.getMonth() + 1).padStart(2, '0') +
+    String(now.getDate()).padStart(2, '0') +
+    String(now.getHours()).padStart(2, '0') +
+    String(now.getMinutes()).padStart(2, '0') +
+    String(now.getSeconds()).padStart(2, '0')
+  );
+}
+
+/** Send STK Push request */
+function sendStkPush(accessToken, { phone, amount, reference, description }) {
+  return new Promise((resolve, reject) => {
+    const timestamp = getTimestamp();
+    const password = Buffer.from(
+      `${process.env.MPESA_SHORTCODE}${process.env.MPESA_PASSKEY}${timestamp}`
+    ).toString('base64');
+
+    const payload = JSON.stringify({
+      BusinessShortCode: process.env.MPESA_SHORTCODE,
+      Password: password,
+      Timestamp: timestamp,
+      TransactionType: 'CustomerPayBillOnline', // Change to CustomerBuyGoodsOnline for Till
+      Amount: Math.round(amount),
+      PartyA: phone,
+      PartyB: process.env.MPESA_SHORTCODE,
+      PhoneNumber: phone,
+      CallBackURL: process.env.MPESA_CALLBACK_URL,
+      AccountReference: reference,
+      TransactionDesc: description,
+    });
+
+    const options = {
+      hostname: DARAJA_BASE,
+      path: '/mpesa/stkpush/v1/processrequest',
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+/** Normalize phone to 254XXXXXXXXX */
+function normalizePhone(raw) {
+  let phone = raw.toString().replace(/\s+/g, '');
+  if (phone.startsWith('07') || phone.startsWith('01')) {
+    phone = '254' + phone.substring(1);
+  }
+  if (phone.startsWith('+')) {
+    phone = phone.substring(1);
+  }
+  return phone;
+}
+
+// ─── ROUTES ──────────────────────────────────────────────────────────────────
 
 // POST /api/payments/initiate
 router.post('/initiate', authMiddleware, async (req, res) => {
@@ -22,7 +134,7 @@ router.post('/initiate', authMiddleware, async (req, res) => {
   }
 
   try {
-    // Get booking
+    // Fetch booking (must belong to logged-in user)
     const { data: booking, error: bookingError } = await supabase
       .from('bookings')
       .select('*')
@@ -38,41 +150,30 @@ router.post('/initiate', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'This booking has already been paid for.' });
     }
 
-    // Normalize phone number to 2547XXXXXXXX
-    let phone = phone_number.toString().replace(/\s+/g, '');
-    if (phone.startsWith('07') || phone.startsWith('01')) {
-      phone = '254' + phone.substring(1);
-    }
-    if (phone.startsWith('+')) {
-      phone = phone.substring(1);
-    }
+    const phone = normalizePhone(phone_number);
+    const reference = `BKT-${booking.id.substring(0, 8).toUpperCase()}`;
 
-    // Get user details for the payment
-    const { data: user } = await supabase
-      .from('users')
-      .select('full_name, email')
-      .eq('id', req.user.id)
-      .single();
-
-    const nameParts = (user?.full_name || 'Guest User').split(' ');
-    const firstName = nameParts[0];
-    const lastName = nameParts.slice(1).join(' ') || firstName;
-
-    // Trigger STK Push using intasend-node SDK
-    const collection = intasend.collection();
-    const response = await collection.mpesaStkPush({
-      first_name: firstName,
-      last_name: lastName,
-      email: user?.email || 'guest@bucketliststaycations.com',
-      host: process.env.FRONTEND_URL || 'https://bucketliststaycations.netlify.app',
-      amount: Math.round(booking.total_amount),
-      phone_number: phone,
-      api_ref: `BKT-${booking.id.substring(0, 8).toUpperCase()}`
+    // Get Daraja token and trigger STK Push
+    const accessToken = await getDarajaToken();
+    const stkResponse = await sendStkPush(accessToken, {
+      phone,
+      amount: booking.total_amount,
+      reference,
+      description: `Payment for booking ${reference}`,
     });
 
-    const intasend_ref = response?.invoice?.invoice_id || response?.id || null;
+    // ResponseCode "0" means STK Push was accepted by Safaricom
+    if (stkResponse.ResponseCode !== '0') {
+      console.error('STK Push rejected:', stkResponse);
+      return res.status(502).json({
+        error: 'M-Pesa could not process the request. Please try again.',
+        details: stkResponse.ResponseDescription || stkResponse.errorMessage,
+      });
+    }
 
-    // Save payment record
+    const mpesa_ref = stkResponse.CheckoutRequestID;
+
+    // Save payment record — use mpesa_ref where instasend_ref was
     const { data: payment, error: paymentError } = await supabase
       .from('payments')
       .insert([{
@@ -80,7 +181,8 @@ router.post('/initiate', authMiddleware, async (req, res) => {
         user_id: req.user.id,
         amount: booking.total_amount,
         phone_number: phone,
-        instasend_ref: intasend_ref
+        instasend_ref: mpesa_ref, // reusing existing column to store CheckoutRequestID
+        status: 'pending',
       }])
       .select()
       .single();
@@ -89,50 +191,78 @@ router.post('/initiate', authMiddleware, async (req, res) => {
 
     res.status(201).json({
       message: 'STK Push sent to your phone. Enter your M-Pesa PIN to complete payment.',
-      payment
+      payment,
+      checkout_request_id: mpesa_ref,
     });
 
   } catch (err) {
-    console.error('Payment error:', err?.response?.data || err?.message || err);
+    console.error('Payment error:', err?.message || err);
     res.status(502).json({
       error: 'Payment could not be initiated. Please try again.',
-      details: err?.response?.data || err?.message
+      details: err?.message,
     });
   }
 });
 
 // POST /api/payments/webhook
+// Safaricom calls this URL after the customer completes or cancels payment.
+// Register this URL on Daraja as your STK Push callback URL.
 router.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
-    console.log('Webhook received:', JSON.stringify(body));
+    console.log('M-Pesa Callback received:', JSON.stringify(body));
 
-    const invoice_id = body?.invoice?.invoice_id || body?.invoice_id || body?.id;
-    const state = body?.invoice?.state || body?.state;
+    // Daraja wraps the result in Body.stkCallback
+    const callback = body?.Body?.stkCallback;
 
-    if (!invoice_id) {
-      return res.status(400).json({ error: 'Invalid webhook payload.' });
+    if (!callback) {
+      return res.status(400).json({ error: 'Invalid callback payload.' });
     }
 
+    const checkoutRequestId = callback.CheckoutRequestID;
+    const resultCode = callback.ResultCode; // 0 = success, anything else = failure
+
+    // Find payment by CheckoutRequestID (stored in instasend_ref column)
     const { data: payment } = await supabase
       .from('payments')
       .select('*')
-      .eq('instasend_ref', invoice_id)
+      .eq('instasend_ref', checkoutRequestId)
       .single();
 
     if (!payment) {
+      console.log('Payment not found for CheckoutRequestID:', checkoutRequestId);
       return res.json({ message: 'Payment not found, ignoring.' });
     }
 
-    if (state === 'COMPLETE') {
-      await supabase.from('payments').update({ status: 'success', paid_at: new Date().toISOString() }).eq('id', payment.id);
-      await supabase.from('bookings').update({ status: 'confirmed' }).eq('id', payment.booking_id);
-      console.log(`✅ Booking ${payment.booking_id} confirmed`);
-    } else if (state === 'FAILED' || state === 'CANCELLED') {
-      await supabase.from('payments').update({ status: 'failed' }).eq('id', payment.id);
+    if (resultCode === 0) {
+      // Extract M-Pesa receipt number from callback metadata
+      const items = callback?.CallbackMetadata?.Item || [];
+      const mpesaReceiptItem = items.find((i) => i.Name === 'MpesaReceiptNumber');
+      const mpesaReceipt = mpesaReceiptItem?.Value || null;
+
+      await supabase
+        .from('payments')
+        .update({ status: 'success', paid_at: new Date().toISOString(), mpesa_receipt: mpesaReceipt })
+        .eq('id', payment.id);
+
+      await supabase
+        .from('bookings')
+        .update({ status: 'confirmed' })
+        .eq('id', payment.booking_id);
+
+      console.log(`✅ Booking ${payment.booking_id} confirmed. Receipt: ${mpesaReceipt}`);
+    } else {
+      // Payment failed or was cancelled by user
+      await supabase
+        .from('payments')
+        .update({ status: 'failed' })
+        .eq('id', payment.id);
+
+      console.log(`❌ Payment failed. ResultCode: ${resultCode} — ${callback.ResultDesc}`);
     }
 
-    res.json({ message: 'Webhook received.' });
+    // Safaricom expects a 200 OK response
+    res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
 
   } catch (err) {
     console.error('Webhook error:', err.message);
