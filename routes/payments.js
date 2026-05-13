@@ -6,9 +6,9 @@ const axios = require('axios');
 const supabase = require('../config/db');
 const { authMiddleware } = require('../middleware/auth');
 
-const INSTASEND_BASE = process.env.INSTASEND_ENV === 'production'
-  ? 'https://app.instasend.io/api'
-  : 'https://sandbox.instasend.io/api';
+const INTASEND_BASE = process.env.INTASEND_ENV === 'production'
+  ? 'https://payment.intasend.com/api/v1'
+  : 'https://sandbox.intasend.com/api/v1';
 
 // POST /api/payments/initiate
 router.post('/initiate', authMiddleware, async (req, res) => {
@@ -35,7 +35,7 @@ router.post('/initiate', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'This booking has already been paid for.' });
     }
 
-    // Normalize phone number
+    // Normalize phone number to 2547XXXXXXXX
     let phone = phone_number.toString().replace(/\s+/g, '');
     if (phone.startsWith('07') || phone.startsWith('01')) {
       phone = '254' + phone.substring(1);
@@ -44,24 +44,26 @@ router.post('/initiate', authMiddleware, async (req, res) => {
       phone = phone.substring(1);
     }
 
-    // Trigger Instasend STK Push
+    // Intasend STK Push
     const response = await axios.post(
-      `${INSTASEND_BASE}/v1/payment/mpesa-stk-push/`,
+      `${INTASEND_BASE}/payment/mpesa-stk-push/`,
       {
-        amount: booking.total_amount,
+        amount: Math.round(booking.total_amount),
         phone_number: phone,
         api_ref: `BKT-${booking.id.substring(0, 8).toUpperCase()}`,
         narrative: 'Bucketlist Staycations Payment'
       },
       {
         headers: {
-          'Authorization': `Bearer ${process.env.INSTASEND_API_KEY}`,
+          'Authorization': `Bearer ${process.env.INTASEND_API_KEY}`,
           'Content-Type': 'application/json'
         }
       }
     );
 
-    const instasend_ref = response.data?.invoice?.invoice_id || null;
+    const intasend_ref = response.data?.invoice?.invoice_id
+      || response.data?.id
+      || null;
 
     // Save payment record
     const { data: payment, error: paymentError } = await supabase
@@ -71,7 +73,7 @@ router.post('/initiate', authMiddleware, async (req, res) => {
         user_id: req.user.id,
         amount: booking.total_amount,
         phone_number: phone,
-        instasend_ref
+        instasend_ref: intasend_ref
       }])
       .select()
       .single();
@@ -85,20 +87,27 @@ router.post('/initiate', authMiddleware, async (req, res) => {
 
   } catch (err) {
     console.error('Payment error:', err.response?.data || err.message);
-    res.status(502).json({ error: 'Payment could not be initiated. Please try again.' });
+    res.status(502).json({
+      error: 'Payment could not be initiated. Please try again.',
+      details: err.response?.data || err.message
+    });
   }
 });
 
-// POST /api/payments/webhook — Instasend calls this after payment
+// POST /api/payments/webhook — Intasend calls this after payment
 router.post('/webhook', async (req, res) => {
   try {
-    const { invoice_id, state } = req.body;
+    const body = req.body;
+    console.log('Webhook received:', JSON.stringify(body));
+
+    // Intasend webhook payload
+    const invoice_id = body?.invoice?.invoice_id || body?.invoice_id || body?.id;
+    const state = body?.invoice?.state || body?.state;
 
     if (!invoice_id) {
       return res.status(400).json({ error: 'Invalid webhook payload.' });
     }
 
-    // Find the payment
     const { data: payment } = await supabase
       .from('payments')
       .select('*')
@@ -122,13 +131,13 @@ router.post('/webhook', async (req, res) => {
 
       console.log(`✅ Payment confirmed for booking ${payment.booking_id}`);
 
-    } else if (state === 'FAILED') {
+    } else if (state === 'FAILED' || state === 'CANCELLED') {
       await supabase
         .from('payments')
         .update({ status: 'failed' })
         .eq('id', payment.id);
 
-      console.log(`❌ Payment failed for booking ${payment.booking_id}`);
+      console.log(`❌ Payment ${state} for booking ${payment.booking_id}`);
     }
 
     res.json({ message: 'Webhook received.' });
@@ -156,6 +165,7 @@ router.get('/:booking_id', authMiddleware, async (req, res) => {
     }
 
     res.json(data);
+
   } catch (err) {
     res.status(500).json({ error: 'Server error.' });
   }
