@@ -2,13 +2,16 @@
 
 const express = require('express');
 const router = express.Router();
-const axios = require('axios');
+const IntaSend = require('intasend-node');
 const supabase = require('../config/db');
 const { authMiddleware } = require('../middleware/auth');
 
-const INTASEND_BASE = process.env.INTASEND_ENV === 'production'
-  ? 'https://payment.intasend.com/api/v1'
-  : 'https://sandbox.intasend.com/api/v1';
+// Initialize Intasend with both keys
+const intasend = new IntaSend(
+  process.env.INTASEND_PUBLISHABLE_KEY,
+  process.env.INTASEND_SECRET_KEY,
+  process.env.INTASEND_ENV !== 'production' // true = test/sandbox
+);
 
 // POST /api/payments/initiate
 router.post('/initiate', authMiddleware, async (req, res) => {
@@ -44,26 +47,30 @@ router.post('/initiate', authMiddleware, async (req, res) => {
       phone = phone.substring(1);
     }
 
-    // Intasend STK Push
-    const response = await axios.post(
-      `${INTASEND_BASE}/payment/mpesa-stk-push/`,
-      {
-        amount: Math.round(booking.total_amount),
-        phone_number: phone,
-        api_ref: `BKT-${booking.id.substring(0, 8).toUpperCase()}`,
-        narrative: 'Bucketlist Staycations Payment'
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.INTASEND_API_KEY}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    // Get user details for the payment
+    const { data: user } = await supabase
+      .from('users')
+      .select('full_name, email')
+      .eq('id', req.user.id)
+      .single();
 
-    const intasend_ref = response.data?.invoice?.invoice_id
-      || response.data?.id
-      || null;
+    const nameParts = (user?.full_name || 'Guest User').split(' ');
+    const firstName = nameParts[0];
+    const lastName = nameParts.slice(1).join(' ') || firstName;
+
+    // Trigger STK Push using intasend-node SDK
+    const collection = intasend.collection();
+    const response = await collection.mpesaStkPush({
+      first_name: firstName,
+      last_name: lastName,
+      email: user?.email || 'guest@bucketliststaycations.com',
+      host: process.env.FRONTEND_URL || 'https://bucketliststaycations.netlify.app',
+      amount: Math.round(booking.total_amount),
+      phone_number: phone,
+      api_ref: `BKT-${booking.id.substring(0, 8).toUpperCase()}`
+    });
+
+    const intasend_ref = response?.invoice?.invoice_id || response?.id || null;
 
     // Save payment record
     const { data: payment, error: paymentError } = await supabase
@@ -86,21 +93,20 @@ router.post('/initiate', authMiddleware, async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Payment error:', err.response?.data || err.message);
+    console.error('Payment error:', err?.response?.data || err?.message || err);
     res.status(502).json({
       error: 'Payment could not be initiated. Please try again.',
-      details: err.response?.data || err.message
+      details: err?.response?.data || err?.message
     });
   }
 });
 
-// POST /api/payments/webhook — Intasend calls this after payment
+// POST /api/payments/webhook
 router.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
     console.log('Webhook received:', JSON.stringify(body));
 
-    // Intasend webhook payload
     const invoice_id = body?.invoice?.invoice_id || body?.invoice_id || body?.id;
     const state = body?.invoice?.state || body?.state;
 
@@ -119,25 +125,11 @@ router.post('/webhook', async (req, res) => {
     }
 
     if (state === 'COMPLETE') {
-      await supabase
-        .from('payments')
-        .update({ status: 'success', paid_at: new Date().toISOString() })
-        .eq('id', payment.id);
-
-      await supabase
-        .from('bookings')
-        .update({ status: 'confirmed' })
-        .eq('id', payment.booking_id);
-
-      console.log(`✅ Payment confirmed for booking ${payment.booking_id}`);
-
+      await supabase.from('payments').update({ status: 'success', paid_at: new Date().toISOString() }).eq('id', payment.id);
+      await supabase.from('bookings').update({ status: 'confirmed' }).eq('id', payment.booking_id);
+      console.log(`✅ Booking ${payment.booking_id} confirmed`);
     } else if (state === 'FAILED' || state === 'CANCELLED') {
-      await supabase
-        .from('payments')
-        .update({ status: 'failed' })
-        .eq('id', payment.id);
-
-      console.log(`❌ Payment ${state} for booking ${payment.booking_id}`);
+      await supabase.from('payments').update({ status: 'failed' }).eq('id', payment.id);
     }
 
     res.json({ message: 'Webhook received.' });
@@ -148,7 +140,7 @@ router.post('/webhook', async (req, res) => {
   }
 });
 
-// GET /api/payments/:booking_id — check payment status
+// GET /api/payments/:booking_id
 router.get('/:booking_id', authMiddleware, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -165,7 +157,6 @@ router.get('/:booking_id', authMiddleware, async (req, res) => {
     }
 
     res.json(data);
-
   } catch (err) {
     res.status(500).json({ error: 'Server error.' });
   }
