@@ -41,29 +41,35 @@ router.post('/register', async (req, res) => {
     });
 
     if (authError) {
-      if (authError.message.includes('already registered')) {
+      if (authError.message.includes('already registered') ||
+          authError.message.includes('User already registered')) {
         return res.status(400).json({ error: 'An account with this email already exists.' });
       }
       throw authError;
     }
 
-    // Also save to our users table with the same UUID from Supabase Auth
-    const { error: dbError } = await supabase
-      .from('users')
-      .insert([{
-        id: authData.user.id,
-        full_name,
-        email,
-        phone: phone || null,
-        password_hash: 'supabase_auth', // managed by Supabase Auth
-        role: 'guest',
-        email_verified: false
-      }]);
+    // authData.user can be null when email confirmation is required
+    // In that case Supabase has queued the confirmation email
+    // We store what we can and let the login handle the rest
+    if (authData.user) {
+      const { error: dbError } = await supabase
+        .from('users')
+        .insert([{
+          id: authData.user.id,
+          full_name,
+          email,
+          phone: phone || null,
+          password_hash: 'supabase_auth',
+          role: 'guest',
+          email_verified: false
+        }]);
 
-    // Ignore duplicate key error (user might already exist in our table)
-    if (dbError && !dbError.message.includes('duplicate')) {
-      console.error('DB insert error:', dbError.message);
+      if (dbError && !dbError.message.includes('duplicate')) {
+        console.error('DB insert error:', dbError.message);
+      }
     }
+    // If authData.user is null, email confirmation is pending
+    // The user row will be created when they first log in after verifying
 
     res.status(201).json({
       message: 'Account created! Please check your email and click the verification link before logging in.'
@@ -104,14 +110,35 @@ router.post('/login', async (req, res) => {
     }
 
     // Get user from our users table
-    const { data: user, error: userError } = await supabase
+    let { data: user, error: userError } = await supabase
       .from('users')
       .select('id, full_name, email, phone, role, created_at')
       .eq('id', authData.user.id)
       .single();
 
+    // If user row doesn't exist yet (email was confirmed but row not created)
+    // create it now from Supabase Auth metadata
     if (userError || !user) {
-      return res.status(404).json({ error: 'User profile not found.' });
+      const meta = authData.user.user_metadata || {};
+      const { data: newUser, error: createError } = await supabase
+        .from('users')
+        .insert([{
+          id: authData.user.id,
+          full_name: meta.full_name || authData.user.email.split('@')[0],
+          email: authData.user.email,
+          phone: meta.phone || null,
+          password_hash: 'supabase_auth',
+          role: 'guest',
+          email_verified: true
+        }])
+        .select('id, full_name, email, phone, role, created_at')
+        .single();
+
+      if (createError) {
+        console.error('User creation error:', createError.message);
+        return res.status(500).json({ error: 'Could not create user profile.' });
+      }
+      user = newUser;
     }
 
     // Update email_verified in our table
