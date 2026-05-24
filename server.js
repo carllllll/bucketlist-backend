@@ -10,6 +10,10 @@ require('dotenv').config();
 
 const app = express();
 
+// ---- TRUST PROXY ----
+// Required for express-rate-limit to work correctly behind Render's proxy
+app.set('trust proxy', 1);
+
 // ---- RATE LIMITING ----
 // General API limit
 const apiLimiter = rateLimit({
@@ -39,8 +43,6 @@ const paymentLimiter = rateLimit({
   message: { error: 'Too many payment attempts. Please try again in an hour.' }
 });
 
-app.use('/api/', apiLimiter);
-
 // ---- MIDDLEWARE ----
 app.use(cors({
   origin: [
@@ -48,18 +50,19 @@ app.use(cors({
     'http://localhost:3000',
     'http://127.0.0.1:5500',
     'http://localhost:5500'
-  ],
+  ].filter(Boolean), // Removes undefined if FRONTEND_URL is not set
   credentials: true
 }));
 
 app.use(express.json());
 
 // ---- ROUTES ----
+// Note: apiLimiter is applied per-route to avoid double-limiting auth routes
 app.use('/api/auth',       authLimiter,    require('./routes/auth'));
-app.use('/api/properties',                 require('./routes/properties'));
+app.use('/api/properties', apiLimiter,     require('./routes/properties'));
 app.use('/api/bookings',   bookingLimiter, require('./routes/bookings'));
 app.use('/api/payments',   paymentLimiter, require('./routes/payments'));
-app.use('/api/reviews',                    require('./routes/reviews'));
+app.use('/api/reviews',    apiLimiter,     require('./routes/reviews'));
 
 // ---- HEALTH CHECK ----
 app.get('/', (req, res) => {
