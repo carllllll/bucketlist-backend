@@ -2,9 +2,9 @@
   "name": "mpesa-stk-push",
   "version": "1.0.0",
   "description": "M-Pesa Daraja STK Push integration using Node.js built-ins only",
-  "main": "mpesa-stk-push.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node mpesa-stk-push.js",
+    "start": "node server.js",
     "dev": "nodemon server.js"
   },
   "dependencies": {
