@@ -1,12 +1,17 @@
 // FILE: bucketlist-backend/routes/auth.js
-// Uses Supabase Auth for email verification and password reset
+// Uses Supabase Auth for password management
+// Uses Resend directly for email verification
 
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const { Resend } = require('resend');
 const { createClient } = require('@supabase/supabase-js');
 const supabase = require('../config/db');
 const { authMiddleware } = require('../middleware/auth');
+
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // Supabase Auth client (uses anon key for auth operations)
 const supabaseAuth = createClient(
@@ -17,7 +22,7 @@ const supabaseAuth = createClient(
 // =============================================
 // REGISTER
 // POST /api/auth/register
-// Supabase sends verification email automatically
+// We send verification email via Resend directly
 // =============================================
 router.post('/register', async (req, res) => {
   const { full_name, email, phone, password } = req.body;
@@ -30,13 +35,13 @@ router.post('/register', async (req, res) => {
   }
 
   try {
-    // Register with Supabase Auth — this sends verification email automatically
+    // Register with Supabase Auth (email confirmation disabled in Supabase dashboard)
     const { data: authData, error: authError } = await supabaseAuth.auth.signUp({
       email,
       password,
       options: {
         data: { full_name, phone: phone || null },
-        emailRedirectTo: `${process.env.FRONTEND_URL}?verified=true`
+        emailRedirectTo: null // We handle verification ourselves
       }
     });
 
@@ -48,28 +53,74 @@ router.post('/register', async (req, res) => {
       throw authError;
     }
 
-    // authData.user can be null when email confirmation is required
-    // In that case Supabase has queued the confirmation email
-    // We store what we can and let the login handle the rest
-    if (authData.user) {
-      const { error: dbError } = await supabase
-        .from('users')
-        .insert([{
-          id: authData.user.id,
-          full_name,
-          email,
-          phone: phone || null,
-          password_hash: 'supabase_auth',
-          role: 'guest',
-          email_verified: false
-        }]);
-
-      if (dbError && !dbError.message.includes('duplicate')) {
-        console.error('DB insert error:', dbError.message);
-      }
+    const userId = authData.user?.id;
+    if (!userId) {
+      return res.status(500).json({ error: 'Could not create account. Please try again.' });
     }
-    // If authData.user is null, email confirmation is pending
-    // The user row will be created when they first log in after verifying
+
+    // Insert user into our users table
+    const { error: dbError } = await supabase
+      .from('users')
+      .insert([{
+        id: userId,
+        full_name,
+        email,
+        phone: phone || null,
+        password_hash: 'supabase_auth',
+        role: 'guest',
+        email_verified: false
+      }]);
+
+    if (dbError && !dbError.message.includes('duplicate')) {
+      console.error('DB insert error:', dbError.message);
+    }
+
+    // Generate verification token
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+    // Store token in verification_tokens table
+    const { error: tokenError } = await supabase
+      .from('verification_tokens')
+      .insert([{
+        user_id: userId,
+        email,
+        token,
+        expires_at: expiresAt.toISOString()
+      }]);
+
+    if (tokenError) {
+      console.error('Token insert error:', tokenError.message);
+      return res.status(500).json({ error: 'Could not generate verification token.' });
+    }
+
+    // Send verification email via Resend
+    const verifyUrl = `${process.env.BACKEND_URL}/api/auth/verify-email?token=${token}`;
+
+    const { error: emailError } = await resend.emails.send({
+      from: 'onboarding@resend.dev',
+      to: email,
+      subject: 'Verify your Bucketlist Staycations account',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #7a9b35;">Welcome to Bucketlist Staycations! 🏡</h2>
+          <p>Hi ${full_name},</p>
+          <p>Thanks for creating an account. Please verify your email address by clicking the button below:</p>
+          <a href="${verifyUrl}" 
+             style="display: inline-block; background: #7a9b35; color: white; padding: 12px 24px; 
+                    text-decoration: none; border-radius: 6px; margin: 16px 0;">
+            Verify Email Address
+          </a>
+          <p style="color: #666; font-size: 14px;">This link expires in 24 hours.</p>
+          <p style="color: #666; font-size: 14px;">If you didn't create this account, you can ignore this email.</p>
+        </div>
+      `
+    });
+
+    if (emailError) {
+      console.error('Resend error:', emailError);
+      return res.status(500).json({ error: 'Could not send verification email. Please try again.' });
+    }
 
     res.status(201).json({
       message: 'Account created! Please check your email and click the verification link before logging in.'
@@ -78,6 +129,56 @@ router.post('/register', async (req, res) => {
   } catch (err) {
     console.error('Register error:', err.message);
     res.status(500).json({ error: 'Server error. Please try again.' });
+  }
+});
+
+// =============================================
+// VERIFY EMAIL
+// GET /api/auth/verify-email?token=xxx
+// User clicks link in email — redirects to frontend
+// =============================================
+router.get('/verify-email', async (req, res) => {
+  const { token } = req.query;
+
+  if (!token) {
+    return res.redirect(`${process.env.FRONTEND_URL}?verified=false&reason=missing_token`);
+  }
+
+  try {
+    // Find token in DB
+    const { data: tokenData, error: tokenError } = await supabase
+      .from('verification_tokens')
+      .select('*')
+      .eq('token', token)
+      .single();
+
+    if (tokenError || !tokenData) {
+      return res.redirect(`${process.env.FRONTEND_URL}?verified=false&reason=invalid_token`);
+    }
+
+    // Check expiry
+    if (new Date() > new Date(tokenData.expires_at)) {
+      return res.redirect(`${process.env.FRONTEND_URL}?verified=false&reason=expired_token`);
+    }
+
+    // Mark user as verified
+    await supabase
+      .from('users')
+      .update({ email_verified: true })
+      .eq('id', tokenData.user_id);
+
+    // Delete used token
+    await supabase
+      .from('verification_tokens')
+      .delete()
+      .eq('token', token);
+
+    // Redirect to frontend with success
+    return res.redirect(`${process.env.FRONTEND_URL}?verified=true`);
+
+  } catch (err) {
+    console.error('Verify email error:', err.message);
+    return res.redirect(`${process.env.FRONTEND_URL}?verified=false&reason=server_error`);
   }
 });
 
@@ -100,52 +201,27 @@ router.post('/login', async (req, res) => {
     });
 
     if (authError) {
-      if (authError.message.includes('Email not confirmed')) {
-        return res.status(403).json({
-          error: 'Please verify your email before logging in. Check your inbox.',
-          unverified: true
-        });
-      }
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
     // Get user from our users table
     let { data: user, error: userError } = await supabase
       .from('users')
-      .select('id, full_name, email, phone, role, created_at')
+      .select('id, full_name, email, phone, role, email_verified, created_at')
       .eq('id', authData.user.id)
       .single();
 
-    // If user row doesn't exist yet (email was confirmed but row not created)
-    // create it now from Supabase Auth metadata
     if (userError || !user) {
-      const meta = authData.user.user_metadata || {};
-      const { data: newUser, error: createError } = await supabase
-        .from('users')
-        .insert([{
-          id: authData.user.id,
-          full_name: meta.full_name || authData.user.email.split('@')[0],
-          email: authData.user.email,
-          phone: meta.phone || null,
-          password_hash: 'supabase_auth',
-          role: 'guest',
-          email_verified: true
-        }])
-        .select('id, full_name, email, phone, role, created_at')
-        .single();
-
-      if (createError) {
-        console.error('User creation error:', createError.message);
-        return res.status(500).json({ error: 'Could not create user profile.' });
-      }
-      user = newUser;
+      return res.status(404).json({ error: 'User profile not found.' });
     }
 
-    // Update email_verified in our table
-    await supabase
-      .from('users')
-      .update({ email_verified: true })
-      .eq('id', user.id);
+    // Block login if email not verified
+    if (!user.email_verified) {
+      return res.status(403).json({
+        error: 'Please verify your email before logging in. Check your inbox.',
+        unverified: true
+      });
+    }
 
     // Generate our JWT token
     const token = jwt.sign(
@@ -174,28 +250,73 @@ router.post('/resend-verification', async (req, res) => {
   }
 
   try {
-    const { error } = await supabaseAuth.auth.resend({
-      type: 'signup',
-      email,
-      options: {
-        emailRedirectTo: `${process.env.FRONTEND_URL}?verified=true`
-      }
-    });
+    // Check user exists and is not yet verified
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id, full_name, email_verified')
+      .eq('email', email)
+      .single();
 
-    if (error) throw error;
+    if (userError || !user) {
+      // Return success anyway to prevent email enumeration
+      return res.json({ message: 'If that account exists, a verification email has been sent.' });
+    }
+
+    if (user.email_verified) {
+      return res.status(400).json({ error: 'This email is already verified. Please log in.' });
+    }
+
+    // Delete any existing tokens for this user
+    await supabase
+      .from('verification_tokens')
+      .delete()
+      .eq('user_id', user.id);
+
+    // Generate new token
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await supabase
+      .from('verification_tokens')
+      .insert([{
+        user_id: user.id,
+        email,
+        token,
+        expires_at: expiresAt.toISOString()
+      }]);
+
+    const verifyUrl = `${process.env.BACKEND_URL}/api/auth/verify-email?token=${token}`;
+
+    await resend.emails.send({
+      from: 'onboarding@resend.dev',
+      to: email,
+      subject: 'Verify your Bucketlist Staycations account',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #7a9b35;">Verify your email 🏡</h2>
+          <p>Hi ${user.full_name},</p>
+          <p>Click the button below to verify your email address:</p>
+          <a href="${verifyUrl}" 
+             style="display: inline-block; background: #7a9b35; color: white; padding: 12px 24px; 
+                    text-decoration: none; border-radius: 6px; margin: 16px 0;">
+            Verify Email Address
+          </a>
+          <p style="color: #666; font-size: 14px;">This link expires in 24 hours.</p>
+        </div>
+      `
+    });
 
     res.json({ message: 'Verification email sent. Please check your inbox.' });
 
   } catch (err) {
-    console.error('Resend error:', err.message);
-    res.status(500).json({ error: 'Server error.' });
+    console.error('Resend verification error:', err.message);
+    res.status(500).json({ error: 'Server error. Please try again.' });
   }
 });
 
 // =============================================
 // FORGOT PASSWORD
 // POST /api/auth/forgot-password
-// Supabase sends reset email automatically
 // =============================================
 router.post('/forgot-password', async (req, res) => {
   const { email } = req.body;
@@ -211,7 +332,6 @@ router.post('/forgot-password', async (req, res) => {
 
     if (error) throw error;
 
-    // Always return success to prevent email enumeration
     res.json({ message: 'If that email exists, a password reset link has been sent.' });
 
   } catch (err) {
@@ -223,7 +343,6 @@ router.post('/forgot-password', async (req, res) => {
 // =============================================
 // RESET PASSWORD
 // POST /api/auth/reset-password
-// Called from the reset password page with new password
 // =============================================
 router.post('/reset-password', async (req, res) => {
   const { access_token, password } = req.body;
@@ -237,7 +356,6 @@ router.post('/reset-password', async (req, res) => {
   }
 
   try {
-    // Set the session using the token from the reset link
     const { error: sessionError } = await supabaseAuth.auth.setSession({
       access_token,
       refresh_token: access_token
@@ -245,10 +363,7 @@ router.post('/reset-password', async (req, res) => {
 
     if (sessionError) throw sessionError;
 
-    // Update the password
-    const { error: updateError } = await supabaseAuth.auth.updateUser({
-      password
-    });
+    const { error: updateError } = await supabaseAuth.auth.updateUser({ password });
 
     if (updateError) throw updateError;
 
