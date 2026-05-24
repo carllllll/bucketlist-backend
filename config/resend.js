@@ -6,8 +6,10 @@
 const { Resend } = require('resend');
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-const OWNER_EMAIL = 'bucketliststaycations@gmail.com';
-const FROM_EMAIL  = 'Bucketlist Staycations <onboarding@resend.dev>'; // Change to your domain later
+// NOTE: onboarding@resend.dev can only deliver to your Resend account email.
+// Once you have a real domain, update both FROM_EMAIL and OWNER_EMAIL.
+const OWNER_EMAIL = process.env.OWNER_EMAIL || 'carlllmugo@gmail.com'; // Your Resend account email
+const FROM_EMAIL  = 'Bucketlist Staycations <onboarding@resend.dev>';
 
 // =============================================
 // NOTIFY OWNER — New Booking
@@ -69,14 +71,15 @@ const notifyGuestBookingCreated = async ({ guestName, guestEmail, propertyName, 
   try {
     await resend.emails.send({
       from:    FROM_EMAIL,
-      to:      guestEmail,
-      subject: `Your booking request — ${propertyName}`,
+      to:      OWNER_EMAIL, // onboarding@resend.dev can only send to Resend account email
+      subject: `[GUEST: ${guestEmail}] Booking request — ${propertyName}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #5a6e2a; padding: 24px 30px; border-radius: 10px 10px 0 0;">
             <h1 style="color: white; margin: 0; font-size: 22px;">🏡 Bucketlist Staycations</h1>
           </div>
           <div style="background: #f9faf5; padding: 30px; border-radius: 0 0 10px 10px;">
+            <p style="color: #e65c00; font-weight: bold;">⚠️ Test mode: This email was meant for guest ${guestName} (${guestEmail}). Add a real domain to send directly to guests.</p>
             <h2 style="color: #3d4a1e;">Hi ${guestName}! 👋</h2>
             <p style="color: #4a5a25; line-height: 1.7;">
               Your booking request for <strong>${propertyName}</strong> has been received.
@@ -157,14 +160,15 @@ const notifyGuestPaymentConfirmed = async ({ guestName, guestEmail, propertyName
   try {
     await resend.emails.send({
       from:    FROM_EMAIL,
-      to:      guestEmail,
-      subject: `✅ Booking Confirmed — ${propertyName}`,
+      to:      OWNER_EMAIL, // onboarding@resend.dev can only send to Resend account email
+      subject: `[GUEST: ${guestEmail}] ✅ Booking Confirmed — ${propertyName}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #276749; padding: 24px 30px; border-radius: 10px 10px 0 0;">
             <h1 style="color: white; margin: 0; font-size: 22px;">✅ Booking Confirmed!</h1>
           </div>
           <div style="background: #f9faf5; padding: 30px; border-radius: 0 0 10px 10px;">
+            <p style="color: #e65c00; font-weight: bold;">⚠️ Test mode: This email was meant for guest ${guestName} (${guestEmail}). Add a real domain to send directly to guests.</p>
             <h2 style="color: #3d4a1e;">You're all set, ${guestName}! 🎉</h2>
             <p style="color: #4a5a25; line-height: 1.7;">
               Your payment has been received and your stay at <strong>${propertyName}</strong> is confirmed.
@@ -183,11 +187,6 @@ const notifyGuestPaymentConfirmed = async ({ guestName, guestEmail, propertyName
                 </tr>
               </table>
             </div>
-
-            <p style="color: #4a5a25; line-height: 1.7;">
-              We look forward to hosting you! If you have any questions before your stay,
-              don't hesitate to reach out.
-            </p>
 
             <div style="text-align: center; margin-top: 24px;">
               <a href="https://wa.me/254716564174"

@@ -119,8 +119,8 @@ router.post('/', authMiddleware, async (req, res) => {
         guestEmail:   guest.email,
         guestPhone:   guest.phone,
         propertyName: property.name,
-        checkIn,
-        checkOut,
+        checkIn:      check_in,
+        checkOut:     check_out,
         nights,
         total:        total_amount,
         bookingId:    booking.id
@@ -130,8 +130,8 @@ router.post('/', authMiddleware, async (req, res) => {
         guestName:    guest.full_name,
         guestEmail:   guest.email,
         propertyName: property.name,
-        checkIn,
-        checkOut,
+        checkIn:      check_in,
+        checkOut:     check_out,
         nights,
         total:        total_amount,
         bookingId:    booking.id
@@ -166,10 +166,10 @@ router.get('/my', authMiddleware, async (req, res) => {
     // Flatten the joined data
     const bookings = data.map(b => ({
       ...b,
-      property_name: b.properties?.name,
+      property_name:     b.properties?.name,
       property_location: b.properties?.location,
-      property_image: b.properties?.cover_image,
-      properties: undefined
+      property_image:    b.properties?.cover_image,
+      properties:        undefined
     }));
 
     res.json(bookings);
@@ -195,11 +195,11 @@ router.get('/:id', authMiddleware, async (req, res) => {
 
     const result = {
       ...data,
-      property_name: data.properties?.name,
+      property_name:     data.properties?.name,
       property_location: data.properties?.location,
-      property_image: data.properties?.cover_image,
-      property_price: data.properties?.price_per_night,
-      properties: undefined
+      property_image:    data.properties?.cover_image,
+      property_price:    data.properties?.price_per_night,
+      properties:        undefined
     };
 
     res.json(result);
