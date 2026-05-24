@@ -4,7 +4,8 @@
   "description": "M-Pesa Daraja STK Push integration using Node.js built-ins only",
   "main": "mpesa-stk-push.js",
   "scripts": {
-    "start": "node mpesa-stk-push.js"
+    "start": "node mpesa-stk-push.js",
+    "dev": "nodemon server.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
@@ -13,7 +14,10 @@
     "dotenv": "^16.3.1",
     "express-rate-limit": "^7.1.5",
     "jsonwebtoken": "^9.0.2",
-    "nodemailer": "^8.0.7"
+    "resend": "^3.2.0"
+  },
+  "devDependencies":{
+    "nodemon": "^3.0.2"
   },
   "engines": {
     "node": ">=14.0.0"

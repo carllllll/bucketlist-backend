@@ -4,6 +4,7 @@ const express = require('express');
 const router = express.Router();
 const supabase = require('../config/db');
 const { authMiddleware } = require('../middleware/auth');
+const { notifyOwnerNewBooking, notifyGuestBookingCreated } = require('../config/resend');
 
 // GET /api/bookings/availability — public
 router.get('/availability', async (req, res) => {
@@ -103,6 +104,39 @@ router.post('/', authMiddleware, async (req, res) => {
       .single();
 
     if (bookingError) throw bookingError;
+
+    // Get guest details for email
+    const { data: guest } = await supabase
+      .from('users')
+      .select('full_name, email, phone')
+      .eq('id', req.user.id)
+      .single();
+
+    // Send email alerts (non-blocking — don't await)
+    if (guest) {
+      notifyOwnerNewBooking({
+        guestName:    guest.full_name,
+        guestEmail:   guest.email,
+        guestPhone:   guest.phone,
+        propertyName: property.name,
+        checkIn,
+        checkOut,
+        nights,
+        total:        total_amount,
+        bookingId:    booking.id
+      });
+
+      notifyGuestBookingCreated({
+        guestName:    guest.full_name,
+        guestEmail:   guest.email,
+        propertyName: property.name,
+        checkIn,
+        checkOut,
+        nights,
+        total:        total_amount,
+        bookingId:    booking.id
+      });
+    }
 
     res.status(201).json({
       message: 'Booking created. Complete payment to confirm your stay.',

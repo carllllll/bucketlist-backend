@@ -1,17 +1,23 @@
 // FILE: bucketlist-backend/routes/auth.js
+// Uses Supabase Auth for email verification and password reset
 
 const express = require('express');
 const router = express.Router();
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 const supabase = require('../config/db');
 const { authMiddleware } = require('../middleware/auth');
-const { sendVerificationEmail, sendPasswordResetEmail } = require('../config/email');
+
+// Supabase Auth client (uses anon key for auth operations)
+const supabaseAuth = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
 // =============================================
 // REGISTER
 // POST /api/auth/register
+// Supabase sends verification email automatically
 // =============================================
 router.post('/register', async (req, res) => {
   const { full_name, email, phone, password } = req.body;
@@ -24,90 +30,48 @@ router.post('/register', async (req, res) => {
   }
 
   try {
-    // Check if email exists
-    const { data: existing } = await supabase
-      .from('users')
-      .select('id')
-      .eq('email', email)
-      .single();
+    // Register with Supabase Auth — this sends verification email automatically
+    const { data: authData, error: authError } = await supabaseAuth.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { full_name, phone: phone || null },
+        emailRedirectTo: `${process.env.FRONTEND_URL}?verified=true`
+      }
+    });
 
-    if (existing) {
-      return res.status(400).json({ error: 'An account with this email already exists.' });
+    if (authError) {
+      if (authError.message.includes('already registered')) {
+        return res.status(400).json({ error: 'An account with this email already exists.' });
+      }
+      throw authError;
     }
 
-    const password_hash = await bcrypt.hash(password, 10);
-    const verification_token = crypto.randomBytes(32).toString('hex');
-
-    const { data: user, error } = await supabase
+    // Also save to our users table with the same UUID from Supabase Auth
+    const { error: dbError } = await supabase
       .from('users')
       .insert([{
+        id: authData.user.id,
         full_name,
         email,
         phone: phone || null,
-        password_hash,
-        email_verified: false,
-        verification_token
-      }])
-      .select('id, full_name, email, phone, role, email_verified, created_at')
-      .single();
+        password_hash: 'supabase_auth', // managed by Supabase Auth
+        role: 'guest',
+        email_verified: false
+      }]);
 
-    if (error) throw error;
-
-    // Send verification email
-    try {
-      await sendVerificationEmail(email, full_name, verification_token);
-    } catch (emailErr) {
-      console.error('Email send error:', emailErr.message);
-      // Don't fail registration if email fails — just log it
+    // Ignore duplicate key error (user might already exist in our table)
+    if (dbError && !dbError.message.includes('duplicate')) {
+      console.error('DB insert error:', dbError.message);
     }
 
     res.status(201).json({
-      message: 'Account created! Please check your email to verify your account before booking.',
-      user
+      message: 'Account created! Please check your email and click the verification link before logging in.'
     });
 
   } catch (err) {
     console.error('Register error:', err.message);
     res.status(500).json({ error: 'Server error. Please try again.' });
-  }
-});
-
-// =============================================
-// VERIFY EMAIL
-// GET /api/auth/verify-email?token=xxx
-// =============================================
-router.get('/verify-email', async (req, res) => {
-  const { token } = req.query;
-
-  if (!token) {
-    return res.status(400).send('<h2>Invalid verification link.</h2>');
-  }
-
-  try {
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id, email_verified')
-      .eq('verification_token', token)
-      .single();
-
-    if (error || !user) {
-      return res.status(400).send('<h2>Invalid or expired verification link.</h2>');
-    }
-
-    if (user.email_verified) {
-      return res.redirect(`${process.env.FRONTEND_URL}?verified=already`);
-    }
-
-    await supabase
-      .from('users')
-      .update({ email_verified: true, verification_token: null })
-      .eq('id', user.id);
-
-    // Redirect to frontend with success
-    res.redirect(`${process.env.FRONTEND_URL}?verified=true`);
-
-  } catch (err) {
-    res.status(500).send('<h2>Server error. Please try again.</h2>');
   }
 });
 
@@ -123,37 +87,47 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    const { data: user, error } = await supabase
+    // Sign in with Supabase Auth
+    const { data: authData, error: authError } = await supabaseAuth.auth.signInWithPassword({
+      email,
+      password
+    });
+
+    if (authError) {
+      if (authError.message.includes('Email not confirmed')) {
+        return res.status(403).json({
+          error: 'Please verify your email before logging in. Check your inbox.',
+          unverified: true
+        });
+      }
+      return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    // Get user from our users table
+    const { data: user, error: userError } = await supabase
       .from('users')
-      .select('*')
-      .eq('email', email)
+      .select('id, full_name, email, phone, role, created_at')
+      .eq('id', authData.user.id)
       .single();
 
-    if (error || !user) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
+    if (userError || !user) {
+      return res.status(404).json({ error: 'User profile not found.' });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password_hash);
-    if (!isMatch) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
-    }
+    // Update email_verified in our table
+    await supabase
+      .from('users')
+      .update({ email_verified: true })
+      .eq('id', user.id);
 
-    // Check email verified
-    if (!user.email_verified) {
-      return res.status(403).json({
-        error: 'Please verify your email before logging in. Check your inbox.',
-        unverified: true
-      });
-    }
-
+    // Generate our JWT token
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
 
-    const { password_hash, verification_token, reset_token, reset_token_expires, ...userSafe } = user;
-    res.json({ message: 'Login successful.', token, user: userSafe });
+    res.json({ message: 'Login successful.', token, user });
 
   } catch (err) {
     console.error('Login error:', err.message);
@@ -173,33 +147,20 @@ router.post('/resend-verification', async (req, res) => {
   }
 
   try {
-    const { data: user } = await supabase
-      .from('users')
-      .select('id, full_name, email_verified, verification_token')
-      .eq('email', email)
-      .single();
+    const { error } = await supabaseAuth.auth.resend({
+      type: 'signup',
+      email,
+      options: {
+        emailRedirectTo: `${process.env.FRONTEND_URL}?verified=true`
+      }
+    });
 
-    if (!user) {
-      // Don't reveal if email exists
-      return res.json({ message: 'If that email exists, a verification link has been sent.' });
-    }
-
-    if (user.email_verified) {
-      return res.status(400).json({ error: 'This email is already verified.' });
-    }
-
-    const verification_token = crypto.randomBytes(32).toString('hex');
-
-    await supabase
-      .from('users')
-      .update({ verification_token })
-      .eq('id', user.id);
-
-    await sendVerificationEmail(email, user.full_name, verification_token);
+    if (error) throw error;
 
     res.json({ message: 'Verification email sent. Please check your inbox.' });
 
   } catch (err) {
+    console.error('Resend error:', err.message);
     res.status(500).json({ error: 'Server error.' });
   }
 });
@@ -207,6 +168,7 @@ router.post('/resend-verification', async (req, res) => {
 // =============================================
 // FORGOT PASSWORD
 // POST /api/auth/forgot-password
+// Supabase sends reset email automatically
 // =============================================
 router.post('/forgot-password', async (req, res) => {
   const { email } = req.body;
@@ -216,28 +178,14 @@ router.post('/forgot-password', async (req, res) => {
   }
 
   try {
-    const { data: user } = await supabase
-      .from('users')
-      .select('id, full_name')
-      .eq('email', email)
-      .single();
+    const { error } = await supabaseAuth.auth.resetPasswordForEmail(email, {
+      redirectTo: `${process.env.FRONTEND_URL}/reset-password.html`
+    });
+
+    if (error) throw error;
 
     // Always return success to prevent email enumeration
-    if (!user) {
-      return res.json({ message: 'If that email exists, a reset link has been sent.' });
-    }
-
-    const reset_token = crypto.randomBytes(32).toString('hex');
-    const reset_token_expires = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
-
-    await supabase
-      .from('users')
-      .update({ reset_token, reset_token_expires })
-      .eq('id', user.id);
-
-    await sendPasswordResetEmail(email, user.full_name, reset_token);
-
-    res.json({ message: 'If that email exists, a reset link has been sent.' });
+    res.json({ message: 'If that email exists, a password reset link has been sent.' });
 
   } catch (err) {
     console.error('Forgot password error:', err.message);
@@ -248,12 +196,13 @@ router.post('/forgot-password', async (req, res) => {
 // =============================================
 // RESET PASSWORD
 // POST /api/auth/reset-password
+// Called from the reset password page with new password
 // =============================================
 router.post('/reset-password', async (req, res) => {
-  const { token, password } = req.body;
+  const { access_token, password } = req.body;
 
-  if (!token || !password) {
-    return res.status(400).json({ error: 'Token and new password are required.' });
+  if (!access_token || !password) {
+    return res.status(400).json({ error: 'Access token and new password are required.' });
   }
 
   if (password.length < 6) {
@@ -261,37 +210,26 @@ router.post('/reset-password', async (req, res) => {
   }
 
   try {
-    const { data: user } = await supabase
-      .from('users')
-      .select('id, reset_token_expires')
-      .eq('reset_token', token)
-      .single();
+    // Set the session using the token from the reset link
+    const { error: sessionError } = await supabaseAuth.auth.setSession({
+      access_token,
+      refresh_token: access_token
+    });
 
-    if (!user) {
-      return res.status(400).json({ error: 'Invalid or expired reset link.' });
-    }
+    if (sessionError) throw sessionError;
 
-    // Check token expiry
-    if (new Date() > new Date(user.reset_token_expires)) {
-      return res.status(400).json({ error: 'Reset link has expired. Please request a new one.' });
-    }
+    // Update the password
+    const { error: updateError } = await supabaseAuth.auth.updateUser({
+      password
+    });
 
-    const password_hash = await bcrypt.hash(password, 10);
-
-    await supabase
-      .from('users')
-      .update({
-        password_hash,
-        reset_token: null,
-        reset_token_expires: null
-      })
-      .eq('id', user.id);
+    if (updateError) throw updateError;
 
     res.json({ message: 'Password reset successfully. You can now log in.' });
 
   } catch (err) {
     console.error('Reset password error:', err.message);
-    res.status(500).json({ error: 'Server error.' });
+    res.status(500).json({ error: 'Invalid or expired reset link. Please request a new one.' });
   }
 });
 
@@ -310,6 +248,7 @@ router.get('/me', authMiddleware, async (req, res) => {
     if (error || !user) {
       return res.status(404).json({ error: 'User not found.' });
     }
+
     res.json(user);
   } catch (err) {
     res.status(500).json({ error: 'Server error.' });
@@ -322,6 +261,7 @@ router.get('/me', authMiddleware, async (req, res) => {
 // =============================================
 router.put('/profile', authMiddleware, async (req, res) => {
   const { full_name, phone } = req.body;
+
   try {
     const updates = {};
     if (full_name) updates.full_name = full_name;
@@ -331,11 +271,12 @@ router.put('/profile', authMiddleware, async (req, res) => {
       .from('users')
       .update(updates)
       .eq('id', req.user.id)
-      .select('id, full_name, email, phone, role, email_verified, created_at')
+      .select('id, full_name, email, phone, role, created_at')
       .single();
 
     if (error) throw error;
     res.json({ message: 'Profile updated.', user });
+
   } catch (err) {
     res.status(500).json({ error: 'Server error.' });
   }
