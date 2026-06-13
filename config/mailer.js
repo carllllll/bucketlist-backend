@@ -1,28 +1,44 @@
 // ================================================
 // FILE LOCATION: bucketlist-backend/config/mailer.js
-// PURPOSE: Send all emails via Gmail SMTP (nodemailer)
+// PURPOSE: Send all emails via the Brevo HTTP API (port 443)
+//   Render blocks outbound SMTP ports, so we use HTTPS instead of nodemailer.
 //   - Verification emails (to the guest)
 //   - Booking + payment alerts (owner + guest)
-// Requires env: EMAIL_USER (your gmail), EMAIL_PASS (gmail App Password)
+// Requires env:
+//   BREVO_API_KEY  — Brevo (sendinblue) API key
+//   SENDER_EMAIL   — a sender address verified in Brevo (e.g. your Gmail)
+//   OWNER_EMAIL    — where owner alerts go (defaults to SENDER_EMAIL)
 // ================================================
 
-const nodemailer = require('nodemailer');
+const SENDER_EMAIL = process.env.SENDER_EMAIL || process.env.EMAIL_USER;
+const SENDER_NAME  = 'Bucketlist Staycations';
+const OWNER_EMAIL  = process.env.OWNER_EMAIL || SENDER_EMAIL;
 
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true,
-  family: 4, // force IPv4 — Render has no IPv6 route (avoids ENETUNREACH)
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS, // Gmail App Password (NOT your normal password)
-  },
-  connectionTimeout: 10000, // fail fast instead of hanging the request
-  greetingTimeout: 10000,
-});
+// Send one email through Brevo's transactional API over HTTPS
+async function sendEmail({ to, toName, subject, html }) {
+  const apiKey = process.env.BREVO_API_KEY;
+  if (!apiKey) throw new Error('BREVO_API_KEY is not set');
 
-const FROM_EMAIL  = `"Bucketlist Staycations" <${process.env.EMAIL_USER}>`;
-const OWNER_EMAIL = process.env.OWNER_EMAIL || process.env.EMAIL_USER;
+  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'api-key': apiKey,
+      'Content-Type': 'application/json',
+      'accept': 'application/json',
+    },
+    body: JSON.stringify({
+      sender: { name: SENDER_NAME, email: SENDER_EMAIL },
+      to: [toName ? { email: to, name: toName } : { email: to }],
+      subject,
+      htmlContent: html,
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`Brevo ${res.status}: ${detail}`);
+  }
+}
 
 // Escape user-supplied text before embedding it in email HTML (prevents HTML injection)
 const esc = (s) =>
@@ -36,9 +52,9 @@ const esc = (s) =>
 const sendVerificationEmail = async (email, full_name, token) => {
   const verifyUrl = `${process.env.BACKEND_URL}/api/auth/verify-email?token=${token}`;
 
-  await transporter.sendMail({
-    from: FROM_EMAIL,
+  await sendEmail({
     to: email,
+    toName: full_name,
     subject: 'Verify your Bucketlist Staycations account',
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -62,8 +78,7 @@ const sendVerificationEmail = async (email, full_name, token) => {
 // =============================================
 const notifyOwnerNewBooking = async ({ guestName, guestEmail, guestPhone, propertyName, checkIn, checkOut, nights, total, bookingId }) => {
   try {
-    await transporter.sendMail({
-      from: FROM_EMAIL,
+    await sendEmail({
       to: OWNER_EMAIL,
       subject: `🏡 New Booking — ${esc(propertyName)}`,
       html: `
@@ -112,9 +127,9 @@ const notifyOwnerNewBooking = async ({ guestName, guestEmail, guestPhone, proper
 // =============================================
 const notifyGuestBookingCreated = async ({ guestName, guestEmail, propertyName, checkIn, checkOut, nights, total, bookingId }) => {
   try {
-    await transporter.sendMail({
-      from: FROM_EMAIL,
+    await sendEmail({
       to: guestEmail,
+      toName: guestName,
       subject: `Booking request received — ${esc(propertyName)}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -159,8 +174,7 @@ const notifyGuestBookingCreated = async ({ guestName, guestEmail, propertyName, 
 // =============================================
 const notifyOwnerPaymentConfirmed = async ({ guestName, guestPhone, propertyName, checkIn, checkOut, total, mpesaReceipt }) => {
   try {
-    await transporter.sendMail({
-      from: FROM_EMAIL,
+    await sendEmail({
       to: OWNER_EMAIL,
       subject: `✅ Payment Confirmed — ${esc(propertyName)}`,
       html: `
@@ -198,9 +212,9 @@ const notifyOwnerPaymentConfirmed = async ({ guestName, guestPhone, propertyName
 // =============================================
 const notifyGuestPaymentConfirmed = async ({ guestName, guestEmail, propertyName, checkIn, checkOut, nights, total, mpesaReceipt }) => {
   try {
-    await transporter.sendMail({
-      from: FROM_EMAIL,
+    await sendEmail({
       to: guestEmail,
+      toName: guestName,
       subject: `✅ Booking Confirmed — ${esc(propertyName)}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
