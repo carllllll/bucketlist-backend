@@ -80,6 +80,11 @@ app.get('/', (req, res) => {
   });
 });
 
+// Lightweight endpoint for uptime monitors (UptimeRobot, etc.)
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
+
 // ---- START ----
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
