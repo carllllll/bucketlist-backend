@@ -103,7 +103,15 @@ router.post('/', authMiddleware, async (req, res) => {
       .select()
       .single();
 
-    if (bookingError) throw bookingError;
+    if (bookingError) {
+      // The DB trigger (prevent_double_booking) raises this on a race condition
+      if (bookingError.message && bookingError.message.toLowerCase().includes('already booked')) {
+        return res.status(409).json({
+          error: 'Sorry, this property is already booked for these dates. Please choose different dates.'
+        });
+      }
+      throw bookingError;
+    }
 
     // Get guest details for email
     const { data: guest } = await supabase

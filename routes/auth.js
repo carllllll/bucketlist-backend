@@ -315,7 +315,7 @@ router.post('/forgot-password', async (req, res) => {
 // POST /api/auth/reset-password
 // =============================================
 router.post('/reset-password', async (req, res) => {
-  const { access_token, password } = req.body;
+  const { access_token, refresh_token, password } = req.body;
 
   if (!access_token || !password) {
     return res.status(400).json({ error: 'Access token and new password are required.' });
@@ -326,14 +326,17 @@ router.post('/reset-password', async (req, res) => {
   }
 
   try {
-    const { error: sessionError } = await supabaseAuth.auth.setSession({
+    // Use a fresh client so concurrent resets don't share/clobber a session
+    const resetClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+
+    const { error: sessionError } = await resetClient.auth.setSession({
       access_token,
-      refresh_token: access_token
+      refresh_token: refresh_token || access_token
     });
 
     if (sessionError) throw sessionError;
 
-    const { error: updateError } = await supabaseAuth.auth.updateUser({ password });
+    const { error: updateError } = await resetClient.auth.updateUser({ password });
 
     if (updateError) throw updateError;
 
