@@ -1,42 +1,47 @@
 // ================================================
 // FILE LOCATION: bucketlist-backend/config/mailer.js
-// PURPOSE: Send all emails via the SendGrid HTTP API (port 443)
+// PURPOSE: Send all emails via the Mailjet HTTP API (port 443)
 //   Render blocks outbound SMTP ports, so we use HTTPS instead of nodemailer.
 //   - Verification emails (to the guest)
 //   - Booking + payment alerts (owner + guest)
 // Requires env:
-//   SENDGRID_API_KEY — SendGrid API key (Settings → API Keys)
-//   SENDER_EMAIL     — a Single Sender verified in SendGrid (e.g. your Gmail)
-//   OWNER_EMAIL      — where owner alerts go (defaults to SENDER_EMAIL)
+//   MAILJET_API_KEY    — Mailjet API Key (public)
+//   MAILJET_SECRET_KEY — Mailjet Secret Key (private)
+//   SENDER_EMAIL       — a sender address verified in Mailjet (e.g. your Gmail)
+//   OWNER_EMAIL        — where owner alerts go (defaults to SENDER_EMAIL)
 // ================================================
 
 const SENDER_EMAIL = process.env.SENDER_EMAIL || process.env.EMAIL_USER;
 const SENDER_NAME  = 'Bucketlist Staycations';
 const OWNER_EMAIL  = process.env.OWNER_EMAIL || SENDER_EMAIL;
 
-// Send one email through SendGrid's mail/send API over HTTPS
+// Send one email through Mailjet's Send API over HTTPS
 async function sendEmail({ to, toName, subject, html }) {
-  const apiKey = process.env.SENDGRID_API_KEY;
-  if (!apiKey) throw new Error('SENDGRID_API_KEY is not set');
+  const pub = process.env.MAILJET_API_KEY;
+  const secret = process.env.MAILJET_SECRET_KEY;
+  if (!pub || !secret) throw new Error('MAILJET_API_KEY / MAILJET_SECRET_KEY not set');
 
-  const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
+  const auth = Buffer.from(`${pub}:${secret}`).toString('base64');
+
+  const res = await fetch('https://api.mailjet.com/v3.1/send', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${apiKey}`,
+      'Authorization': `Basic ${auth}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      personalizations: [{ to: [toName ? { email: to, name: toName } : { email: to }] }],
-      from: { email: SENDER_EMAIL, name: SENDER_NAME },
-      subject,
-      content: [{ type: 'text/html', value: html }],
+      Messages: [{
+        From: { Email: SENDER_EMAIL, Name: SENDER_NAME },
+        To: [toName ? { Email: to, Name: toName } : { Email: to }],
+        Subject: subject,
+        HTMLPart: html,
+      }],
     }),
   });
 
-  // SendGrid returns 202 Accepted on success
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`SendGrid ${res.status}: ${detail}`);
+    throw new Error(`Mailjet ${res.status}: ${detail}`);
   }
 }
 
