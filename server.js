@@ -8,6 +8,13 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
+// Render containers have no IPv6 route — force DNS to return IPv4 first so
+// outbound connections (e.g. Gmail SMTP) don't fail with ENETUNREACH on an IPv6 address.
+const dns = require('dns');
+if (typeof dns.setDefaultResultOrder === 'function') {
+  dns.setDefaultResultOrder('ipv4first');
+}
+
 const app = express();
 
 // ---- TRUST PROXY ----

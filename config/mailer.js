@@ -9,11 +9,16 @@
 const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true,
+  family: 4, // force IPv4 — Render has no IPv6 route (avoids ENETUNREACH)
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS, // Gmail App Password (NOT your normal password)
   },
+  connectionTimeout: 10000, // fail fast instead of hanging the request
+  greetingTimeout: 10000,
 });
 
 const FROM_EMAIL  = `"Bucketlist Staycations" <${process.env.EMAIL_USER}>`;
