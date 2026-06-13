@@ -8,7 +8,7 @@ const router = express.Router();
 const https = require('https');
 const supabase = require('../config/db');
 const { authMiddleware } = require('../middleware/auth');
-const { notifyOwnerPaymentConfirmed, notifyGuestPaymentConfirmed } = require('../config/resend');
+const { notifyOwnerPaymentConfirmed, notifyGuestPaymentConfirmed } = require('../config/mailer');
 
 // ─── DARAJA HELPERS ──────────────────────────────────────────────────────────
 
@@ -87,6 +87,49 @@ function sendStkPush(accessToken, { phone, amount, reference, description }) {
     const options = {
       hostname: DARAJA_BASE,
       path: '/mpesa/stkpush/v1/processrequest',
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+/** Query Daraja for the real status of an STK Push (used to verify webhook callbacks) */
+function queryStkStatus(accessToken, checkoutRequestId) {
+  return new Promise((resolve, reject) => {
+    const timestamp = getTimestamp();
+    const password = Buffer.from(
+      `${process.env.MPESA_SHORTCODE}${process.env.MPESA_PASSKEY}${timestamp}`
+    ).toString('base64');
+
+    const payload = JSON.stringify({
+      BusinessShortCode: process.env.MPESA_SHORTCODE,
+      Password: password,
+      Timestamp: timestamp,
+      CheckoutRequestID: checkoutRequestId,
+    });
+
+    const options = {
+      hostname: DARAJA_BASE,
+      path: '/mpesa/stkpushquery/v1/query',
       method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -232,7 +275,34 @@ router.post('/webhook', async (req, res) => {
       return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
     }
 
-    if (resultCode === 0) {
+    // Idempotency: ignore callbacks for payments we've already finalized
+    if (payment.status !== 'pending') {
+      console.log(`Payment ${payment.id} already ${payment.status}; ignoring duplicate callback.`);
+      return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+    }
+
+    // SECURITY: this endpoint is public, so never trust the callback body alone.
+    // A success result is only honoured if Daraja independently confirms it.
+    if (Number(resultCode) === 0) {
+      let verified = false;
+      try {
+        const token = await getDarajaToken();
+        const status = await queryStkStatus(token, checkoutRequestId);
+        verified = String(status.ResultCode) === '0';
+        if (!verified) {
+          console.warn('STK query did not confirm success:', JSON.stringify(status));
+        }
+      } catch (verifyErr) {
+        console.error('Could not verify payment with Daraja:', verifyErr.message);
+      }
+
+      if (!verified) {
+        console.warn(`⚠️ Unverified success callback for ${checkoutRequestId} — NOT confirming booking.`);
+        return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+      }
+    }
+
+    if (Number(resultCode) === 0) {
       // Extract M-Pesa receipt number
       const items = callback?.CallbackMetadata?.Item || [];
       const mpesaReceiptItem = items.find((i) => i.Name === 'MpesaReceiptNumber');

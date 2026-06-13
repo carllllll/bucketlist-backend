@@ -1,17 +1,15 @@
 // FILE: bucketlist-backend/routes/auth.js
 // Uses Supabase Auth for password management
-// Uses Resend directly for email verification
+// Uses Gmail SMTP (config/mailer) for email verification
 
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const { Resend } = require('resend');
 const { createClient } = require('@supabase/supabase-js');
 const supabase = require('../config/db');
 const { authMiddleware } = require('../middleware/auth');
-
-const resend = new Resend(process.env.RESEND_API_KEY);
+const { sendVerificationEmail } = require('../config/mailer');
 
 // Supabase Auth client (uses anon key for auth operations)
 const supabaseAuth = createClient(
@@ -22,7 +20,7 @@ const supabaseAuth = createClient(
 // =============================================
 // REGISTER
 // POST /api/auth/register
-// We send verification email via Resend directly
+// We send verification email via Gmail SMTP directly
 // =============================================
 router.post('/register', async (req, res) => {
   const { full_name, email, phone, password } = req.body;
@@ -94,31 +92,11 @@ router.post('/register', async (req, res) => {
       return res.status(500).json({ error: 'Could not generate verification token.' });
     }
 
-    // Send verification email via Resend
-    const verifyUrl = `${process.env.BACKEND_URL}/api/auth/verify-email?token=${token}`;
-
-    const { error: emailError } = await resend.emails.send({
-      from: 'onboarding@resend.dev',
-      to: email,
-      subject: 'Verify your Bucketlist Staycations account',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #7a9b35;">Welcome to Bucketlist Staycations! 🏡</h2>
-          <p>Hi ${full_name},</p>
-          <p>Thanks for creating an account. Please verify your email address by clicking the button below:</p>
-          <a href="${verifyUrl}" 
-             style="display: inline-block; background: #7a9b35; color: white; padding: 12px 24px; 
-                    text-decoration: none; border-radius: 6px; margin: 16px 0;">
-            Verify Email Address
-          </a>
-          <p style="color: #666; font-size: 14px;">This link expires in 24 hours.</p>
-          <p style="color: #666; font-size: 14px;">If you didn't create this account, you can ignore this email.</p>
-        </div>
-      `
-    });
-
-    if (emailError) {
-      console.error('Resend error:', emailError);
+    // Send verification email via Gmail SMTP
+    try {
+      await sendVerificationEmail(email, full_name, token);
+    } catch (emailError) {
+      console.error('Verification email error:', emailError.message);
       return res.status(500).json({ error: 'Could not send verification email. Please try again.' });
     }
 
@@ -285,26 +263,7 @@ router.post('/resend-verification', async (req, res) => {
         expires_at: expiresAt.toISOString()
       }]);
 
-    const verifyUrl = `${process.env.BACKEND_URL}/api/auth/verify-email?token=${token}`;
-
-    await resend.emails.send({
-      from: 'onboarding@resend.dev',
-      to: email,
-      subject: 'Verify your Bucketlist Staycations account',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #7a9b35;">Verify your email 🏡</h2>
-          <p>Hi ${user.full_name},</p>
-          <p>Click the button below to verify your email address:</p>
-          <a href="${verifyUrl}" 
-             style="display: inline-block; background: #7a9b35; color: white; padding: 12px 24px; 
-                    text-decoration: none; border-radius: 6px; margin: 16px 0;">
-            Verify Email Address
-          </a>
-          <p style="color: #666; font-size: 14px;">This link expires in 24 hours.</p>
-        </div>
-      `
-    });
+    await sendVerificationEmail(email, user.full_name, token);
 
     res.json({ message: 'Verification email sent. Please check your inbox.' });
 

@@ -1,62 +1,100 @@
 // ================================================
-// FILE LOCATION: bucketlist-backend/config/resend.js
-// PURPOSE: Send booking alerts and confirmations via Resend
+// FILE LOCATION: bucketlist-backend/config/mailer.js
+// PURPOSE: Send all emails via Gmail SMTP (nodemailer)
+//   - Verification emails (to the guest)
+//   - Booking + payment alerts (owner + guest)
+// Requires env: EMAIL_USER (your gmail), EMAIL_PASS (gmail App Password)
 // ================================================
 
-const { Resend } = require('resend');
-const resend = new Resend(process.env.RESEND_API_KEY);
+const nodemailer = require('nodemailer');
 
-// NOTE: onboarding@resend.dev can only deliver to your Resend account email.
-// Once you have a real domain, update both FROM_EMAIL and OWNER_EMAIL.
-const OWNER_EMAIL = process.env.OWNER_EMAIL || 'carlllmugo@gmail.com'; // Your Resend account email
-const FROM_EMAIL  = 'Bucketlist Staycations <onboarding@resend.dev>';
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS, // Gmail App Password (NOT your normal password)
+  },
+});
+
+const FROM_EMAIL  = `"Bucketlist Staycations" <${process.env.EMAIL_USER}>`;
+const OWNER_EMAIL = process.env.OWNER_EMAIL || process.env.EMAIL_USER;
+
+// Escape user-supplied text before embedding it in email HTML (prevents HTML injection)
+const esc = (s) =>
+  String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])
+  );
+
+// =============================================
+// VERIFICATION EMAIL — sent to the guest
+// =============================================
+const sendVerificationEmail = async (email, full_name, token) => {
+  const verifyUrl = `${process.env.BACKEND_URL}/api/auth/verify-email?token=${token}`;
+
+  await transporter.sendMail({
+    from: FROM_EMAIL,
+    to: email,
+    subject: 'Verify your Bucketlist Staycations account',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #7a9b35;">Welcome to Bucketlist Staycations! 🏡</h2>
+        <p>Hi ${esc(full_name)},</p>
+        <p>Thanks for creating an account. Please verify your email address by clicking the button below:</p>
+        <a href="${verifyUrl}"
+           style="display: inline-block; background: #7a9b35; color: white; padding: 12px 24px;
+                  text-decoration: none; border-radius: 6px; margin: 16px 0;">
+          Verify Email Address
+        </a>
+        <p style="color: #666; font-size: 14px;">This link expires in 24 hours.</p>
+        <p style="color: #666; font-size: 14px;">If you didn't create this account, you can ignore this email.</p>
+      </div>
+    `,
+  });
+};
 
 // =============================================
 // NOTIFY OWNER — New Booking
 // =============================================
 const notifyOwnerNewBooking = async ({ guestName, guestEmail, guestPhone, propertyName, checkIn, checkOut, nights, total, bookingId }) => {
   try {
-    await resend.emails.send({
-      from:    FROM_EMAIL,
-      to:      OWNER_EMAIL,
-      subject: `🏡 New Booking — ${propertyName}`,
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: OWNER_EMAIL,
+      subject: `🏡 New Booking — ${esc(propertyName)}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #5a6e2a; padding: 24px 30px; border-radius: 10px 10px 0 0;">
             <h1 style="color: white; margin: 0; font-size: 22px;">🏡 New Booking Received</h1>
           </div>
           <div style="background: #f9faf5; padding: 30px; border-radius: 0 0 10px 10px;">
-
             <div style="background: white; border-radius: 10px; padding: 20px; margin-bottom: 20px; border: 1px solid #d4e0a8;">
               <h2 style="color: #3d4a1e; margin: 0 0 16px 0; font-size: 18px;">📋 Booking Details</h2>
               <table style="width: 100%; border-collapse: collapse;">
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Property</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${propertyName}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-in</td><td style="padding: 8px 0; color: #1a2008;">${checkIn}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-out</td><td style="padding: 8px 0; color: #1a2008;">${checkOut}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Nights</td><td style="padding: 8px 0; color: #1a2008;">${nights}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Property</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${esc(propertyName)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-in</td><td style="padding: 8px 0; color: #1a2008;">${esc(checkIn)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-out</td><td style="padding: 8px 0; color: #1a2008;">${esc(checkOut)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Nights</td><td style="padding: 8px 0; color: #1a2008;">${esc(nights)}</td></tr>
                 <tr style="border-top: 1px solid #d4e0a8;">
                   <td style="padding: 12px 0 8px; color: #5a6e2a; font-weight: bold;">Total Amount</td>
                   <td style="padding: 12px 0 8px; color: #5a6e2a; font-weight: bold; font-size: 18px;">KES ${Number(total).toLocaleString()}</td>
                 </tr>
               </table>
             </div>
-
             <div style="background: white; border-radius: 10px; padding: 20px; border: 1px solid #d4e0a8;">
               <h2 style="color: #3d4a1e; margin: 0 0 16px 0; font-size: 18px;">👤 Guest Details</h2>
               <table style="width: 100%; border-collapse: collapse;">
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Name</td><td style="padding: 8px 0; color: #1a2008;">${guestName}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Email</td><td style="padding: 8px 0; color: #1a2008;"><a href="mailto:${guestEmail}">${guestEmail}</a></td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Phone</td><td style="padding: 8px 0; color: #1a2008;">${guestPhone || 'Not provided'}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Booking ID</td><td style="padding: 8px 0; color: #1a2008; font-size: 12px;">${bookingId}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Name</td><td style="padding: 8px 0; color: #1a2008;">${esc(guestName)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Email</td><td style="padding: 8px 0; color: #1a2008;">${esc(guestEmail)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Phone</td><td style="padding: 8px 0; color: #1a2008;">${esc(guestPhone) || 'Not provided'}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Booking ID</td><td style="padding: 8px 0; color: #1a2008; font-size: 12px;">${esc(bookingId)}</td></tr>
               </table>
             </div>
-
             <p style="color: #7a8c50; font-size: 13px; margin-top: 20px; text-align: center;">
               ⏳ Payment is pending. Booking will be confirmed once payment is received.
             </p>
           </div>
         </div>
-      `
+      `,
     });
     console.log('✅ Owner booking alert sent');
   } catch (err) {
@@ -69,44 +107,41 @@ const notifyOwnerNewBooking = async ({ guestName, guestEmail, guestPhone, proper
 // =============================================
 const notifyGuestBookingCreated = async ({ guestName, guestEmail, propertyName, checkIn, checkOut, nights, total, bookingId }) => {
   try {
-    await resend.emails.send({
-      from:    FROM_EMAIL,
-      to:      OWNER_EMAIL, // onboarding@resend.dev can only send to Resend account email
-      subject: `[GUEST: ${guestEmail}] Booking request — ${propertyName}`,
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: guestEmail,
+      subject: `Booking request received — ${esc(propertyName)}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #5a6e2a; padding: 24px 30px; border-radius: 10px 10px 0 0;">
             <h1 style="color: white; margin: 0; font-size: 22px;">🏡 Bucketlist Staycations</h1>
           </div>
           <div style="background: #f9faf5; padding: 30px; border-radius: 0 0 10px 10px;">
-            <p style="color: #e65c00; font-weight: bold;">⚠️ Test mode: This email was meant for guest ${guestName} (${guestEmail}). Add a real domain to send directly to guests.</p>
-            <h2 style="color: #3d4a1e;">Hi ${guestName}! 👋</h2>
+            <h2 style="color: #3d4a1e;">Hi ${esc(guestName)}! 👋</h2>
             <p style="color: #4a5a25; line-height: 1.7;">
-              Your booking request for <strong>${propertyName}</strong> has been received.
+              Your booking request for <strong>${esc(propertyName)}</strong> has been received.
               Please complete your M-Pesa payment to confirm your stay.
             </p>
-
             <div style="background: white; border-radius: 10px; padding: 20px; margin: 20px 0; border: 1px solid #d4e0a8;">
               <h3 style="color: #3d4a1e; margin: 0 0 16px 0;">📋 Your Booking</h3>
               <table style="width: 100%; border-collapse: collapse;">
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Property</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${propertyName}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-in</td><td style="padding: 8px 0; color: #1a2008;">${checkIn}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-out</td><td style="padding: 8px 0; color: #1a2008;">${checkOut}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Nights</td><td style="padding: 8px 0; color: #1a2008;">${nights}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Property</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${esc(propertyName)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-in</td><td style="padding: 8px 0; color: #1a2008;">${esc(checkIn)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-out</td><td style="padding: 8px 0; color: #1a2008;">${esc(checkOut)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Nights</td><td style="padding: 8px 0; color: #1a2008;">${esc(nights)}</td></tr>
                 <tr style="border-top: 1px solid #d4e0a8;">
                   <td style="padding: 12px 0 8px; color: #5a6e2a; font-weight: bold;">Total</td>
                   <td style="padding: 12px 0 8px; color: #5a6e2a; font-weight: bold; font-size: 18px;">KES ${Number(total).toLocaleString()}</td>
                 </tr>
               </table>
             </div>
-
             <p style="color: #7a8c50; font-size: 13px; text-align: center;">
-              Questions? Contact us at <a href="mailto:${OWNER_EMAIL}" style="color: #7a9b35;">${OWNER_EMAIL}</a>
+              Questions? Contact us at <a href="mailto:${esc(OWNER_EMAIL)}" style="color: #7a9b35;">${esc(OWNER_EMAIL)}</a>
               or WhatsApp <a href="https://wa.me/254716564174" style="color: #7a9b35;">+254 716 564 174</a>
             </p>
           </div>
         </div>
-      `
+      `,
     });
     console.log('✅ Guest booking email sent');
   } catch (err) {
@@ -119,10 +154,10 @@ const notifyGuestBookingCreated = async ({ guestName, guestEmail, propertyName, 
 // =============================================
 const notifyOwnerPaymentConfirmed = async ({ guestName, guestPhone, propertyName, checkIn, checkOut, total, mpesaReceipt }) => {
   try {
-    await resend.emails.send({
-      from:    FROM_EMAIL,
-      to:      OWNER_EMAIL,
-      subject: `✅ Payment Confirmed — ${propertyName}`,
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: OWNER_EMAIL,
+      subject: `✅ Payment Confirmed — ${esc(propertyName)}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #276749; padding: 24px 30px; border-radius: 10px 10px 0 0;">
@@ -131,12 +166,12 @@ const notifyOwnerPaymentConfirmed = async ({ guestName, guestPhone, propertyName
           <div style="background: #f9faf5; padding: 30px; border-radius: 0 0 10px 10px;">
             <div style="background: white; border-radius: 10px; padding: 20px; border: 1px solid #d4e0a8;">
               <table style="width: 100%; border-collapse: collapse;">
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Property</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${propertyName}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Guest</td><td style="padding: 8px 0; color: #1a2008;">${guestName}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Phone</td><td style="padding: 8px 0; color: #1a2008;">${guestPhone}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-in</td><td style="padding: 8px 0; color: #1a2008;">${checkIn}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-out</td><td style="padding: 8px 0; color: #1a2008;">${checkOut}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">M-Pesa Receipt</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${mpesaReceipt || 'N/A'}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Property</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${esc(propertyName)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Guest</td><td style="padding: 8px 0; color: #1a2008;">${esc(guestName)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Phone</td><td style="padding: 8px 0; color: #1a2008;">${esc(guestPhone)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-in</td><td style="padding: 8px 0; color: #1a2008;">${esc(checkIn)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-out</td><td style="padding: 8px 0; color: #1a2008;">${esc(checkOut)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">M-Pesa Receipt</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${esc(mpesaReceipt) || 'N/A'}</td></tr>
                 <tr style="border-top: 1px solid #d4e0a8;">
                   <td style="padding: 12px 0 8px; color: #276749; font-weight: bold;">Amount Paid</td>
                   <td style="padding: 12px 0 8px; color: #276749; font-weight: bold; font-size: 18px;">KES ${Number(total).toLocaleString()}</td>
@@ -145,7 +180,7 @@ const notifyOwnerPaymentConfirmed = async ({ guestName, guestPhone, propertyName
             </div>
           </div>
         </div>
-      `
+      `,
     });
     console.log('✅ Payment confirmation email sent to owner');
   } catch (err) {
@@ -158,36 +193,33 @@ const notifyOwnerPaymentConfirmed = async ({ guestName, guestPhone, propertyName
 // =============================================
 const notifyGuestPaymentConfirmed = async ({ guestName, guestEmail, propertyName, checkIn, checkOut, nights, total, mpesaReceipt }) => {
   try {
-    await resend.emails.send({
-      from:    FROM_EMAIL,
-      to:      OWNER_EMAIL, // onboarding@resend.dev can only send to Resend account email
-      subject: `[GUEST: ${guestEmail}] ✅ Booking Confirmed — ${propertyName}`,
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: guestEmail,
+      subject: `✅ Booking Confirmed — ${esc(propertyName)}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: #276749; padding: 24px 30px; border-radius: 10px 10px 0 0;">
             <h1 style="color: white; margin: 0; font-size: 22px;">✅ Booking Confirmed!</h1>
           </div>
           <div style="background: #f9faf5; padding: 30px; border-radius: 0 0 10px 10px;">
-            <p style="color: #e65c00; font-weight: bold;">⚠️ Test mode: This email was meant for guest ${guestName} (${guestEmail}). Add a real domain to send directly to guests.</p>
-            <h2 style="color: #3d4a1e;">You're all set, ${guestName}! 🎉</h2>
+            <h2 style="color: #3d4a1e;">You're all set, ${esc(guestName)}! 🎉</h2>
             <p style="color: #4a5a25; line-height: 1.7;">
-              Your payment has been received and your stay at <strong>${propertyName}</strong> is confirmed.
+              Your payment has been received and your stay at <strong>${esc(propertyName)}</strong> is confirmed.
             </p>
-
             <div style="background: white; border-radius: 10px; padding: 20px; margin: 20px 0; border: 1px solid #d4e0a8;">
               <table style="width: 100%; border-collapse: collapse;">
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Property</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${propertyName}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-in</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${checkIn}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-out</td><td style="padding: 8px 0; color: #1a2008;">${checkOut}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Nights</td><td style="padding: 8px 0; color: #1a2008;">${nights}</td></tr>
-                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">M-Pesa Receipt</td><td style="padding: 8px 0; color: #1a2008;">${mpesaReceipt || 'N/A'}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Property</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${esc(propertyName)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-in</td><td style="padding: 8px 0; color: #1a2008; font-weight: bold;">${esc(checkIn)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Check-out</td><td style="padding: 8px 0; color: #1a2008;">${esc(checkOut)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">Nights</td><td style="padding: 8px 0; color: #1a2008;">${esc(nights)}</td></tr>
+                <tr><td style="padding: 8px 0; color: #7a8c50; font-size: 14px;">M-Pesa Receipt</td><td style="padding: 8px 0; color: #1a2008;">${esc(mpesaReceipt) || 'N/A'}</td></tr>
                 <tr style="border-top: 1px solid #d4e0a8;">
                   <td style="padding: 12px 0 8px; color: #276749; font-weight: bold;">Amount Paid</td>
                   <td style="padding: 12px 0 8px; color: #276749; font-weight: bold; font-size: 18px;">KES ${Number(total).toLocaleString()}</td>
                 </tr>
               </table>
             </div>
-
             <div style="text-align: center; margin-top: 24px;">
               <a href="https://wa.me/254716564174"
                  style="background: #25D366; color: white; padding: 12px 28px;
@@ -195,13 +227,12 @@ const notifyGuestPaymentConfirmed = async ({ guestName, guestEmail, propertyName
                 💬 WhatsApp Us
               </a>
             </div>
-
             <p style="color: #7a8c50; font-size: 13px; text-align: center; margin-top: 20px;">
-              Bucketlist Staycations — ${OWNER_EMAIL}
+              Bucketlist Staycations — ${esc(OWNER_EMAIL)}
             </p>
           </div>
         </div>
-      `
+      `,
     });
     console.log('✅ Guest confirmation email sent');
   } catch (err) {
@@ -210,8 +241,9 @@ const notifyGuestPaymentConfirmed = async ({ guestName, guestEmail, propertyName
 };
 
 module.exports = {
+  sendVerificationEmail,
   notifyOwnerNewBooking,
   notifyGuestBookingCreated,
   notifyOwnerPaymentConfirmed,
-  notifyGuestPaymentConfirmed
+  notifyGuestPaymentConfirmed,
 };

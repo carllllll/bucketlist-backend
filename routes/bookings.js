@@ -4,7 +4,7 @@ const express = require('express');
 const router = express.Router();
 const supabase = require('../config/db');
 const { authMiddleware } = require('../middleware/auth');
-const { notifyOwnerNewBooking, notifyGuestBookingCreated } = require('../config/resend');
+const { notifyOwnerNewBooking, notifyGuestBookingCreated } = require('../config/mailer');
 
 // GET /api/bookings/availability — public
 router.get('/availability', async (req, res) => {
