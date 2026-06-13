@@ -179,6 +179,8 @@ router.post('/login', async (req, res) => {
     });
 
     if (authError) {
+      // Log the real reason server-side (e.g. "Email not confirmed" vs "Invalid login credentials")
+      console.error('Supabase sign-in error:', authError.message);
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
