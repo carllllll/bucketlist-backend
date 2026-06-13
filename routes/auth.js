@@ -56,6 +56,10 @@ router.post('/register', async (req, res) => {
       return res.status(500).json({ error: 'Could not create account. Please try again.' });
     }
 
+    // Email verification is OFF by default so the app works without an email
+    // provider. Set REQUIRE_EMAIL_VERIFICATION=true (once SendGrid is live) to re-enable it.
+    const requireVerification = process.env.REQUIRE_EMAIL_VERIFICATION === 'true';
+
     // Insert user into our users table
     const { error: dbError } = await supabase
       .from('users')
@@ -66,11 +70,16 @@ router.post('/register', async (req, res) => {
         phone: phone || null,
         password_hash: 'supabase_auth',
         role: 'guest',
-        email_verified: false
+        email_verified: !requireVerification // auto-verified when verification is off
       }]);
 
     if (dbError && !dbError.message.includes('duplicate')) {
       console.error('DB insert error:', dbError.message);
+    }
+
+    if (!requireVerification) {
+      // Option A: account is usable immediately, no verification email needed.
+      return res.status(201).json({ message: 'Account created! You can now log in.' });
     }
 
     // Generate verification token
@@ -92,7 +101,7 @@ router.post('/register', async (req, res) => {
       return res.status(500).json({ error: 'Could not generate verification token.' });
     }
 
-    // Send verification email via Gmail SMTP
+    // Send verification email
     try {
       await sendVerificationEmail(email, full_name, token);
     } catch (emailError) {

@@ -1,42 +1,42 @@
 // ================================================
 // FILE LOCATION: bucketlist-backend/config/mailer.js
-// PURPOSE: Send all emails via the Brevo HTTP API (port 443)
+// PURPOSE: Send all emails via the SendGrid HTTP API (port 443)
 //   Render blocks outbound SMTP ports, so we use HTTPS instead of nodemailer.
 //   - Verification emails (to the guest)
 //   - Booking + payment alerts (owner + guest)
 // Requires env:
-//   BREVO_API_KEY  — Brevo (sendinblue) API key
-//   SENDER_EMAIL   — a sender address verified in Brevo (e.g. your Gmail)
-//   OWNER_EMAIL    — where owner alerts go (defaults to SENDER_EMAIL)
+//   SENDGRID_API_KEY — SendGrid API key (Settings → API Keys)
+//   SENDER_EMAIL     — a Single Sender verified in SendGrid (e.g. your Gmail)
+//   OWNER_EMAIL      — where owner alerts go (defaults to SENDER_EMAIL)
 // ================================================
 
 const SENDER_EMAIL = process.env.SENDER_EMAIL || process.env.EMAIL_USER;
 const SENDER_NAME  = 'Bucketlist Staycations';
 const OWNER_EMAIL  = process.env.OWNER_EMAIL || SENDER_EMAIL;
 
-// Send one email through Brevo's transactional API over HTTPS
+// Send one email through SendGrid's mail/send API over HTTPS
 async function sendEmail({ to, toName, subject, html }) {
-  const apiKey = process.env.BREVO_API_KEY;
-  if (!apiKey) throw new Error('BREVO_API_KEY is not set');
+  const apiKey = process.env.SENDGRID_API_KEY;
+  if (!apiKey) throw new Error('SENDGRID_API_KEY is not set');
 
-  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+  const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
     method: 'POST',
     headers: {
-      'api-key': apiKey,
+      'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
-      'accept': 'application/json',
     },
     body: JSON.stringify({
-      sender: { name: SENDER_NAME, email: SENDER_EMAIL },
-      to: [toName ? { email: to, name: toName } : { email: to }],
+      personalizations: [{ to: [toName ? { email: to, name: toName } : { email: to }] }],
+      from: { email: SENDER_EMAIL, name: SENDER_NAME },
       subject,
-      htmlContent: html,
+      content: [{ type: 'text/html', value: html }],
     }),
   });
 
+  // SendGrid returns 202 Accepted on success
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`Brevo ${res.status}: ${detail}`);
+    throw new Error(`SendGrid ${res.status}: ${detail}`);
   }
 }
 
