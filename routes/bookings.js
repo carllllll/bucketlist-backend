@@ -6,6 +6,25 @@ const supabase = require('../config/db');
 const { authMiddleware } = require('../middleware/auth');
 const { notifyOwnerNewBooking, notifyGuestBookingCreated } = require('../config/mailer');
 
+// How long an unpaid 'pending' booking holds its dates before being released.
+const BOOKING_HOLD_MINUTES = parseInt(process.env.BOOKING_HOLD_MINUTES || '30', 10);
+
+// Auto-cancel unpaid 'pending' bookings older than the hold window so they don't
+// lock dates forever. Lazy cleanup (runs on availability/booking checks — no cron needed).
+// The window is far longer than an STK-push flow, so live payments aren't affected;
+// a late payment is still re-confirmed by the webhook.
+async function releaseExpiredPending(property_id) {
+  const cutoff = new Date(Date.now() - BOOKING_HOLD_MINUTES * 60 * 1000).toISOString();
+  let q = supabase
+    .from('bookings')
+    .update({ status: 'cancelled' })
+    .eq('status', 'pending')
+    .lt('created_at', cutoff);
+  if (property_id) q = q.eq('property_id', property_id);
+  const { error } = await q;
+  if (error) console.error('releaseExpiredPending error:', error.message);
+}
+
 // GET /api/bookings/availability — public
 router.get('/availability', async (req, res) => {
   const { property_id, check_in, check_out } = req.query;
@@ -15,6 +34,8 @@ router.get('/availability', async (req, res) => {
   }
 
   try {
+    await releaseExpiredPending(property_id); // free up abandoned holds first
+
     const { data, error } = await supabase
       .from('bookings')
       .select('id')
@@ -72,7 +93,8 @@ router.post('/', authMiddleware, async (req, res) => {
 
     const total_amount = nights * parseFloat(property.price_per_night);
 
-    // Check availability again before inserting
+    // Release abandoned holds, then check availability again before inserting
+    await releaseExpiredPending(property_id);
     const { data: conflict } = await supabase
       .from('bookings')
       .select('id')

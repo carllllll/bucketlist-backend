@@ -303,10 +303,24 @@ router.post('/webhook', async (req, res) => {
     }
 
     if (Number(resultCode) === 0) {
-      // Extract M-Pesa receipt number
+      // Extract M-Pesa receipt number and the actual amount paid
       const items = callback?.CallbackMetadata?.Item || [];
       const mpesaReceiptItem = items.find((i) => i.Name === 'MpesaReceiptNumber');
       const mpesaReceipt = mpesaReceiptItem?.Value || null;
+      const paidAmount = Number(items.find((i) => i.Name === 'Amount')?.Value);
+      const expectedAmount = Math.round(Number(payment.amount));
+
+      // SECURITY: verify the amount actually paid matches what we expected.
+      // (STK pushes a fixed amount, so a mismatch means something is wrong —
+      // don't confirm the booking; flag for manual reconciliation.)
+      if (Number.isFinite(paidAmount) && Math.round(paidAmount) !== expectedAmount) {
+        console.warn(
+          `⚠️ AMOUNT MISMATCH for ${checkoutRequestId}: paid ${paidAmount}, expected ${expectedAmount}. ` +
+          `Receipt ${mpesaReceipt}. NOT confirming booking ${payment.booking_id} — reconcile manually.`
+        );
+        await supabase.from('payments').update({ status: 'failed' }).eq('id', payment.id);
+        return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+      }
 
       await supabase
         .from('payments')
